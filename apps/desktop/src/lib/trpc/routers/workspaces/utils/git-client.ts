@@ -45,11 +45,32 @@ function toWslInternalPath(repoPath: string): string {
 	return internal ?? repoPath;
 }
 
+/**
+ * Check if a path is a WSL path (re-export for convenience)
+ */
+export { isWslPath, wslPathToInternal };
+
+/**
+ * Get a simple-git instance for the given path.
+ * 
+ * NOTE: For WSL paths, this returns a simple-git instance without a baseDir,
+ * because simple-git cannot validate WSL paths from Windows. Operations on
+ * WSL repos should prefer execGitWithShellPath for proper WSL git execution.
+ */
 export async function getSimpleGitWithShellPath(
 	repoPath?: string,
 ): Promise<SimpleGit> {
-	// For WSL paths, we can't use simple-git directly - it spawns Windows git
-	// Return a simple-git instance but WSL operations should use execGitWithShellPath
+	// For WSL paths, we can't use simple-git with a baseDir because it
+	// validates the directory exists using Windows file APIs.
+	// Return a simple-git instance without a baseDir - operations will fail
+	// if they try to use it, but at least instantiation won't throw.
+	if (repoPath && isWslRepoPath(repoPath)) {
+		// Return simple-git without baseDir - operations should use execGitWithShellPath
+		const git = simpleGit();
+		git.env(await getProcessEnvWithShellPath());
+		return git;
+	}
+
 	const git = repoPath ? simpleGit(repoPath) : simpleGit();
 	git.env(await getProcessEnvWithShellPath());
 	return git;
