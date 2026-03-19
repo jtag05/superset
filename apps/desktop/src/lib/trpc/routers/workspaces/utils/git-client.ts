@@ -6,8 +6,7 @@ import {
 import { promisify } from "node:util";
 import simpleGit, { type SimpleGit } from "simple-git";
 import { getProcessEnvWithShellPath } from "./shell-env";
-import { isWslPath, getDistributionFromWslPath } from "../../../../../main/lib/wsl/detect";
-import { wslPathToInternal } from "../../../../../main/lib/wsl/detect";
+import { isWslPath, getDistributionFromWslPath, wslPathToInternal } from "../../../../../main/lib/wsl/detect";
 
 const execFileAsync = promisify(execFile);
 
@@ -49,23 +48,8 @@ function toWslInternalPath(repoPath: string): string {
 export async function getSimpleGitWithShellPath(
 	repoPath?: string,
 ): Promise<SimpleGit> {
-	// For WSL paths, we need to use simple-git with WSL git
-	if (isWslRepoPath(repoPath)) {
-		const distribution = getWslDistributionForPath(repoPath);
-		if (distribution) {
-			const internalPath = toWslInternalPath(repoPath!);
-			// Create a simple-git instance that will use WSL git
-			const git = simpleGit({
-				baseDir: internalPath,
-				config: [
-					`core.fsmonitor=true`,
-				],
-			});
-			// The actual git commands will be wrapped via execGitWithShellPath
-			return git;
-		}
-	}
-
+	// For WSL paths, we can't use simple-git directly - it spawns Windows git
+	// Return a simple-git instance but WSL operations should use execGitWithShellPath
 	const git = repoPath ? simpleGit(repoPath) : simpleGit();
 	git.env(await getProcessEnvWithShellPath());
 	return git;
@@ -85,15 +69,15 @@ export async function execGitWithShellPath(
 		const distribution = getWslDistributionForPath(repoPath);
 		if (distribution) {
 			const internalPath = toWslInternalPath(repoPath!);
-			// Execute git via WSL
+			// Execute git via WSL - use git -C to set working directory
+			// Note: We don't use cwd option because Windows can't set Linux paths as cwd
 			return execFileAsync(
 				"wsl.exe",
-				["-d", distribution, "--", "git", ...args],
+				["-d", distribution, "--", "git", "-C", internalPath, ...args],
 				{
-					...options,
 					encoding: "utf8",
 					env,
-					cwd: internalPath,
+					// Don't set cwd - it won't work with Linux paths on Windows
 				},
 			);
 		}
@@ -121,15 +105,14 @@ export function execGitWithShellPathSync(
 		const distribution = getWslDistributionForPath(repoPath);
 		if (distribution) {
 			const internalPath = toWslInternalPath(repoPath!);
-			// Execute git via WSL synchronously
+			// Execute git via WSL synchronously - use git -C to set working directory
 			const result = execFileSync(
 				"wsl.exe",
-				["-d", distribution, "--", "git", ...args],
+				["-d", distribution, "--", "git", "-C", internalPath, ...args],
 				{
-					...options,
 					encoding: "utf8",
 					env: process.env,
-					cwd: internalPath,
+					// Don't set cwd - it won't work with Linux paths on Windows
 				},
 			) as string;
 			return { stdout: result, stderr: "" };
