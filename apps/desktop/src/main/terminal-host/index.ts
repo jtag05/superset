@@ -25,6 +25,7 @@ import { createServer, type Server, Socket } from "node:net";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { SUPERSET_DIR_NAME } from "shared/constants";
+import { getTerminalHostIpcPath } from "../lib/terminal-host/ipc-transports/types";
 import {
 	type ClearScrollbackRequest,
 	type CreateOrAttachRequest,
@@ -58,8 +59,10 @@ const DAEMON_VERSION = "1.0.0";
 // This allows workspace-specific home directories (e.g., ~/.superset-my-feature)
 const SUPERSET_HOME_DIR = join(homedir(), SUPERSET_DIR_NAME);
 
-// Socket and token paths
-const SOCKET_PATH = join(SUPERSET_HOME_DIR, "terminal-host.sock");
+// IPC path is platform-specific (Unix socket on Unix, named pipe on Windows)
+const IPC_PATH = getTerminalHostIpcPath(SUPERSET_HOME_DIR);
+
+// Token and PID paths (always in home directory)
 const TOKEN_PATH = join(SUPERSET_HOME_DIR, "terminal-host.token");
 const PID_PATH = join(SUPERSET_HOME_DIR, "terminal-host.pid");
 
@@ -632,12 +635,14 @@ function handleConnection(socket: Socket) {
 }
 
 /**
- * Check if there's an active daemon listening on the socket.
- * Returns true if socket is live and responding.
+ * Check if there's an active daemon listening on the socket/pipe.
+ * Returns true if socket/pipe is live and responding.
  */
 function isSocketLive(): Promise<boolean> {
 	return new Promise((resolve) => {
-		if (!existsSync(SOCKET_PATH)) {
+		// On Windows, named pipes don't exist as filesystem entries,
+		// so we always need to attempt connection to check liveness
+		if (process.platform !== "win32" && !existsSync(IPC_PATH)) {
 			resolve(false);
 			return;
 		}
@@ -659,7 +664,7 @@ function isSocketLive(): Promise<boolean> {
 			resolve(false);
 		});
 
-		testSocket.connect(SOCKET_PATH);
+		testSocket.connect(IPC_PATH);
 	});
 }
 
@@ -670,28 +675,39 @@ async function startServer(): Promise<void> {
 		log("info", `Created directory: ${SUPERSET_HOME_DIR}`);
 	}
 
-	// Ensure directory has correct permissions
-	try {
-		chmodSync(SUPERSET_HOME_DIR, 0o700);
-	} catch {
-		// May fail if not owner, that's okay
+	// Ensure directory has correct permissions (Unix only)
+	if (process.platform !== "win32") {
+		try {
+			chmodSync(SUPERSET_HOME_DIR, 0o700);
+		} catch {
+			// May fail if not owner, that's okay
+		}
 	}
 
-	// Check if socket is live before removing it
+	// Check if socket/pipe is live before removing it
 	// This prevents orphaning a running daemon
-	if (existsSync(SOCKET_PATH)) {
+	// On Windows, named pipes don't have filesystem entries to check,
+	// but isSocketLive will return false if the pipe doesn't exist
+	const socketOrPipeExists =
+		process.platform === "win32" || existsSync(IPC_PATH);
+
+	if (socketOrPipeExists) {
 		const isLive = await isSocketLive();
 		if (isLive) {
 			log("error", "Another daemon is already running and responsive");
 			throw new Error("Another daemon is already running");
 		}
 
-		// Socket exists but not responsive - safe to remove
-		try {
-			unlinkSync(SOCKET_PATH);
-			log("info", "Removed stale socket file");
-		} catch (error) {
-			throw new Error(`Failed to remove stale socket: ${error}`);
+		// Socket/pipe exists but not responsive - safe to remove
+		// On Windows, named pipes are automatically cleaned up when the
+		// server that created them closes, so we don't need to unlink
+		if (process.platform !== "win32") {
+			try {
+				unlinkSync(IPC_PATH);
+				log("info", "Removed stale socket file");
+			} catch (error) {
+				throw new Error(`Failed to remove stale socket: ${error}`);
+			}
 		}
 	}
 
@@ -741,19 +757,23 @@ async function startServer(): Promise<void> {
 			}
 		});
 
-		newServer.listen(SOCKET_PATH, () => {
-			// Set socket permissions (readable/writable by owner only)
-			try {
-				chmodSync(SOCKET_PATH, 0o600);
-			} catch {
-				// May fail on some systems, that's okay - directory permissions protect us
+		newServer.listen(IPC_PATH, () => {
+			// Set socket/pipe permissions (readable/writable by owner only)
+			// Note: On Windows, this only affects Unix-style permissions which don't
+			// apply to named pipes, so we skip chmod on Windows.
+			if (process.platform !== "win32") {
+				try {
+					chmodSync(IPC_PATH, 0o600);
+				} catch {
+					// May fail on some systems, that's okay - directory permissions protect us
+				}
 			}
 
 			// Write PID file
 			writeFileSync(PID_PATH, String(process.pid), { mode: 0o600 });
 
 			log("info", `Daemon started`);
-			log("info", `Socket: ${SOCKET_PATH}`);
+			log("info", `Socket: ${IPC_PATH}`);
 			log("info", `PID: ${process.pid}`);
 			resolve();
 		});
@@ -778,7 +798,10 @@ async function stopServer(): Promise<void> {
 	});
 
 	try {
-		if (existsSync(SOCKET_PATH)) unlinkSync(SOCKET_PATH);
+		// On Windows, named pipes are automatically cleaned up when the server closes
+		if (process.platform !== "win32" && existsSync(IPC_PATH)) {
+			unlinkSync(IPC_PATH);
+		}
 		if (existsSync(PID_PATH)) unlinkSync(PID_PATH);
 	} catch {
 		// Best effort cleanup

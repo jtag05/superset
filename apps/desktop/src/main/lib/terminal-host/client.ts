@@ -28,6 +28,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { app } from "electron";
 import { SUPERSET_DIR_NAME } from "shared/constants";
+import { getTerminalHostIpcPath } from "./ipc-transports/types";
 import {
 	type ClearScrollbackRequest,
 	type CreateOrAttachRequest,
@@ -69,7 +70,9 @@ const DEBUG_CLIENT = process.env.SUPERSET_TERMINAL_DEBUG === "1";
 // Get from shared constants for multi-worktree support (imported at top of file)
 const SUPERSET_HOME_DIR = join(homedir(), SUPERSET_DIR_NAME);
 
-const SOCKET_PATH = join(SUPERSET_HOME_DIR, "terminal-host.sock");
+// IPC path is platform-specific (Unix socket on Unix, named pipe on Windows)
+const IPC_PATH = getTerminalHostIpcPath(SUPERSET_HOME_DIR);
+
 const TOKEN_PATH = join(SUPERSET_HOME_DIR, "terminal-host.token");
 const PID_PATH = join(SUPERSET_HOME_DIR, "terminal-host.pid");
 const SPAWN_LOCK_PATH = join(SUPERSET_HOME_DIR, "terminal-host.spawn.lock");
@@ -177,7 +180,7 @@ export class TerminalHostClient extends EventEmitter {
 			console.log("[TerminalHostClient] Initialized with paths:", {
 				SUPERSET_DIR_NAME,
 				SUPERSET_HOME_DIR,
-				SOCKET_PATH,
+				IPC_PATH,
 				NODE_ENV: process.env.NODE_ENV,
 			});
 		}
@@ -428,12 +431,12 @@ export class TerminalHostClient extends EventEmitter {
 
 	private async tryConnectControl(): Promise<boolean> {
 		return new Promise((resolve) => {
-			if (!existsSync(SOCKET_PATH)) {
+			if (!existsSync(IPC_PATH)) {
 				resolve(false);
 				return;
 			}
 
-			const socket = connect(SOCKET_PATH);
+			const socket = connect(IPC_PATH);
 			let resolved = false;
 
 			const timeout = setTimeout(() => {
@@ -468,12 +471,14 @@ export class TerminalHostClient extends EventEmitter {
 
 	private async tryConnectStream(): Promise<boolean> {
 		return new Promise((resolve) => {
-			if (!existsSync(SOCKET_PATH)) {
+			// On Windows, named pipes don't have filesystem entries,
+			// so we skip the existsSync check and try to connect directly
+			if (process.platform !== "win32" && !existsSync(IPC_PATH)) {
 				resolve(false);
 				return;
 			}
 
-			const socket = connect(SOCKET_PATH);
+			const socket = connect(IPC_PATH);
 			let resolved = false;
 
 			const timeout = setTimeout(() => {
@@ -813,12 +818,14 @@ export class TerminalHostClient extends EventEmitter {
 	}: {
 		killSessions?: boolean;
 	} = {}): Promise<void> {
-		if (!existsSync(SOCKET_PATH)) return;
+		// On Windows, named pipes don't have filesystem entries,
+		// but we'll try to connect anyway to check if daemon is running
+		if (process.platform !== "win32" && !existsSync(IPC_PATH)) return;
 
 		const token = this.readAuthToken();
 
 		await new Promise<void>((resolve, reject) => {
-			const socket = connect(SOCKET_PATH);
+			const socket = connect(IPC_PATH);
 			let settled = false;
 
 			const timeoutId = setTimeout(() => {
@@ -908,7 +915,8 @@ export class TerminalHostClient extends EventEmitter {
 		const timeoutMs = 2000;
 
 		while (Date.now() - startTime < timeoutMs) {
-			if (!existsSync(SOCKET_PATH)) return;
+			// On Windows, named pipes don't have filesystem entries
+			if (process.platform !== "win32" && !existsSync(IPC_PATH)) return;
 			const live = await this.isSocketLive();
 			if (!live) return;
 			await this.sleep(100);
@@ -920,17 +928,19 @@ export class TerminalHostClient extends EventEmitter {
 	// ===========================================================================
 
 	/**
-	 * Check if there's an active daemon listening on the socket.
-	 * Returns true if socket is live and responding.
+	 * Check if there's an active daemon listening on the socket/pipe.
+	 * Returns true if socket/pipe is live and responding.
 	 */
 	private isSocketLive(): Promise<boolean> {
 		return new Promise((resolve) => {
-			if (!existsSync(SOCKET_PATH)) {
+			// On Windows, named pipes don't have filesystem entries,
+			// so we skip the existsSync check and try to connect directly
+			if (process.platform !== "win32" && !existsSync(IPC_PATH)) {
 				resolve(false);
 				return;
 			}
 
-			const testSocket = connect(SOCKET_PATH);
+			const testSocket = connect(IPC_PATH);
 			const timeout = setTimeout(() => {
 				testSocket.destroy();
 				resolve(false);
@@ -1007,7 +1017,11 @@ export class TerminalHostClient extends EventEmitter {
 	private async spawnDaemon(): Promise<void> {
 		// Check if socket is live first - this is the authoritative check
 		// PID file can be stale if daemon crashed and PID was reused by another process
-		if (existsSync(SOCKET_PATH)) {
+		// On Windows, named pipes don't have filesystem entries
+		const socketOrPipeExists =
+			process.platform === "win32" || existsSync(IPC_PATH);
+
+		if (socketOrPipeExists) {
 			const isLive = await this.isSocketLive();
 			if (isLive) {
 				if (DEBUG_CLIENT) {
@@ -1020,10 +1034,13 @@ export class TerminalHostClient extends EventEmitter {
 			if (DEBUG_CLIENT) {
 				console.log("[TerminalHostClient] Removing stale socket file");
 			}
-			try {
-				unlinkSync(SOCKET_PATH);
-			} catch {
-				// Ignore - might not have permission
+			// On Windows, named pipes are automatically cleaned up
+			if (process.platform !== "win32") {
+				try {
+					unlinkSync(IPC_PATH);
+				} catch {
+					// Ignore - might not have permission
+				}
 			}
 		}
 
@@ -1175,7 +1192,7 @@ export class TerminalHostClient extends EventEmitter {
 		const startTime = Date.now();
 
 		while (Date.now() - startTime < SPAWN_WAIT_MS) {
-			if (existsSync(SOCKET_PATH)) {
+			if (existsSync(IPC_PATH)) {
 				// Give it a moment to start listening
 				await this.sleep(200);
 				return;

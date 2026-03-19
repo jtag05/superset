@@ -4,6 +4,12 @@ import os from "node:os";
 import defaultShell from "default-shell";
 import { env } from "shared/env.shared";
 import { getShellEnv } from "../agent-setup/shell-wrappers";
+import { isWslPath } from "../wsl/detect";
+import {
+	getDefaultWslShell,
+	getWslShellWithPreferences,
+	type WslShellConfig,
+} from "../wsl/shell-provider";
 
 const MACOS_SYSTEM_CERT_FILE = "/etc/ssl/cert.pem";
 let cachedUtf8Locale: string | null = null;
@@ -64,23 +70,94 @@ export function normalizeDefaultShell(
 	return null;
 }
 
-export function getDefaultShell(): string {
+/**
+ * Options for getDefaultShell
+ */
+export interface GetShellOptions {
+	/**
+	 * Prefer WSL shell when the working directory is a WSL path
+	 */
+	preferWsl?: boolean;
+	/**
+	 * Working directory to check for WSL path detection
+	 */
+	cwd?: string;
+}
+
+/**
+ * Result of shell resolution
+ */
+export interface ShellResolutionResult {
+	/** The shell executable */
+	shell: string;
+	/** Arguments to pass to the shell */
+	args?: string[];
+	/** Whether this is a WSL shell */
+	isWsl: boolean;
+	/** WSL distribution name (if WSL shell) */
+	distribution?: string;
+}
+
+export function getDefaultShell(options?: GetShellOptions): string {
+	const resolved = resolveShell(options);
+	return resolved.shell;
+}
+
+/**
+ * Resolve the shell to use, optionally preferring WSL
+ */
+export function resolveShell(options?: GetShellOptions): ShellResolutionResult {
+	const { preferWsl = false, cwd } = options ?? {};
+
+	// Check if we should use WSL based on the working directory
+	if (preferWsl && cwd && isWslPath(cwd)) {
+		const wslResult = getWslShellWithPreferences({ workingDirectory: cwd });
+		if (wslResult.success) {
+			return {
+				shell: "wsl.exe",
+				args: buildWslArgs(wslResult.config),
+				isWsl: true,
+				distribution: wslResult.config.distribution,
+			};
+		}
+	}
+
+	// Fall back to native shell
 	const resolvedDefaultShell = normalizeDefaultShell(defaultShell);
 	if (resolvedDefaultShell) {
-		return resolvedDefaultShell;
+		return { shell: resolvedDefaultShell, isWsl: false };
 	}
 
 	const platform = os.platform();
 
 	if (platform === "win32") {
-		return process.env.COMSPEC || "powershell.exe";
+		return {
+			shell: process.env.COMSPEC || "powershell.exe",
+			isWsl: false,
+		};
 	}
 
 	if (process.env.SHELL) {
-		return process.env.SHELL;
+		return { shell: process.env.SHELL, isWsl: false };
 	}
 
-	return "/bin/sh";
+	return { shell: "/bin/sh", isWsl: false };
+}
+
+/**
+ * Build WSL command arguments for spawning a shell
+ */
+function buildWslArgs(config: WslShellConfig): string[] {
+	const args: string[] = ["-d", config.distribution];
+
+	// Build the shell command
+	const shellCommand = config.shellArgs
+		? `${config.shell} ${config.shellArgs.join(" ")}`
+		: config.shell;
+
+	args.push("--", "bash", "-c", `${shellCommand}`);
+
+	return args;
 }
 
 export function getLocale(baseEnv: Record<string, string>): string {

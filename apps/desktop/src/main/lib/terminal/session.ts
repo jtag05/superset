@@ -10,7 +10,7 @@ import {
 	containsClearScrollbackSequence,
 	extractContentAfterClear,
 } from "../terminal-escape-filter";
-import { buildTerminalEnv, FALLBACK_SHELL, getDefaultShell } from "./env";
+import { buildTerminalEnv, FALLBACK_SHELL, resolveShell } from "./env";
 import { PtyWriteQueue } from "./pty-write-queue";
 import type { InternalCreateSessionParams, TerminalSession } from "./types";
 
@@ -59,19 +59,38 @@ export function recoverScrollback(params: {
 
 function spawnPty(params: {
 	shell: string;
+	args?: string[];
 	cols: number;
 	rows: number;
 	cwd: string;
 	env: Record<string, string>;
+	isWsl?: boolean;
+	distribution?: string;
 }): pty.IPty {
-	const { shell, cols, rows, cwd, env } = params;
-	const shellArgs = getShellArgs(shell);
+	const { shell, args, cols, rows, cwd, env, isWsl, distribution } = params;
 
-	return pty.spawn(shell, shellArgs, {
+	let finalCwd = cwd;
+	let finalShell = shell;
+	let finalArgs = args ?? getShellArgs(shell);
+
+	// For WSL shells, we need to convert the working directory to a WSL internal path
+	if (isWsl && distribution) {
+		// The cwd is a Windows UNC path like \\wsl$\Ubuntu\home\user
+		// We need to convert it to a WSL internal path like /home/user
+		const { wslPathToInternal } = require("../wsl/detect");
+		const internalPath = wslPathToInternal(cwd);
+		if (internalPath) {
+			finalCwd = internalPath;
+		}
+		// For WSL, we use wsl.exe as the shell and pass bash -c with the actual shell
+		// The args should already be set up by resolveShell
+	}
+
+	return pty.spawn(finalShell, finalArgs, {
 		name: "xterm-256color",
 		cols,
 		rows,
-		cwd,
+		cwd: finalCwd,
 		env,
 	});
 }
@@ -95,7 +114,9 @@ export async function createSession(
 		themeType,
 	} = params;
 
-	const shell = useFallbackShell ? FALLBACK_SHELL : getDefaultShell();
+	const shellConfig = useFallbackShell
+		? { shell: FALLBACK_SHELL, isWsl: false }
+		: resolveShell({ preferWsl: true, cwd });
 	const workingDir = cwd || os.homedir();
 	const terminalCols = cols || DEFAULT_COLS;
 	const terminalRows = rows || DEFAULT_ROWS;
@@ -103,7 +124,9 @@ export async function createSession(
 	if (DEBUG_TERMINAL) {
 		console.log("[Terminal Session] Creating session:", {
 			paneId,
-			shell,
+			shell: shellConfig.shell,
+			isWsl: shellConfig.isWsl,
+			distribution: shellConfig.distribution,
 			workingDir,
 			terminalCols,
 			terminalRows,
@@ -112,7 +135,7 @@ export async function createSession(
 	}
 
 	const env = buildTerminalEnv({
-		shell,
+		shell: shellConfig.shell,
 		paneId,
 		tabId,
 		workspaceId,
@@ -133,11 +156,13 @@ export async function createSession(
 	});
 
 	const ptyProcess = spawnPty({
-		shell,
+		shell: shellConfig.shell,
+		args: shellConfig.args,
 		cols: terminalCols,
 		rows: terminalRows,
 		cwd: workingDir,
 		env,
+		isWsl: shellConfig.isWsl,
 	});
 
 	const dataBatcher = new DataBatcher((batchedData) => {
@@ -160,7 +185,7 @@ export async function createSession(
 		wasRecovered,
 		dataBatcher,
 		writeQueue,
-		shell,
+		shell: shellConfig.shell,
 		startTime: Date.now(),
 		usedFallback: useFallbackShell,
 	};
