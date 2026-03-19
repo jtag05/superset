@@ -192,31 +192,40 @@ export function getDefaultWslDistribution(): WslDistribution | null {
 }
 
 /**
- * Check if a path is a WSL UNC path (\\wsl$\...)
+ * Check if a path is a WSL UNC path (\\wsl$\... or \\wsl.localhost\...)
  *
  * These paths are Windows representations of WSL filesystem paths.
+ * Supports both the classic \\wsl$\ format and the newer \\wsl.localhost\ format.
  */
 export function isWslPath(path: string): boolean {
-	return path.startsWith("\\\\wsl$\\") || path.startsWith("//wsl$/");
+	const normalizedPath = path.replace(/\\/g, "/");
+	return (
+		normalizedPath.startsWith("//wsl$/") ||
+		normalizedPath.startsWith("//wsl.localhost/")
+	);
 }
 
 /**
  * Extract the distribution name from a WSL UNC path
  *
  * e.g., "\\wsl$\Ubuntu\home\user" -> "Ubuntu"
+ * e.g., "\\wsl.localhost\Ubuntu\home\user" -> "Ubuntu"
  */
 export function getDistributionFromWslPath(wslPath: string): string | null {
 	if (!isWslPath(wslPath)) {
 		return null;
 	}
 
-	// Remove \\wsl$\ or //wsl$/ prefix
-	const pathWithoutPrefix = wslPath
-		.replace(/^\\\\wsl\$\\/, "")
-		.replace(/^\/\/wsl\$\//, "");
+	// Normalize path separators
+	const normalizedPath = wslPath.replace(/\\/g, "/");
+
+	// Remove prefix (either //wsl$/ or //wsl.localhost/)
+	const pathWithoutPrefix = normalizedPath
+		.replace(/^\/\/wsl\$\//, "")
+		.replace(/^\/\/wsl\.localhost\//, "");
 
 	// The first component is the distribution name
-	const parts = pathWithoutPrefix.split("\\").join("/").split("/");
+	const parts = pathWithoutPrefix.split("/");
 	return parts[0] || null;
 }
 
@@ -224,19 +233,23 @@ export function getDistributionFromWslPath(wslPath: string): string | null {
  * Convert a WSL UNC path to a WSL internal path
  *
  * e.g., "\\wsl$\Ubuntu\home\user" -> "/home/user"
+ * e.g., "\\wsl.localhost\Ubuntu\home\user" -> "/home/user"
  */
 export function wslPathToInternal(wslPath: string): string | null {
 	if (!isWslPath(wslPath)) {
 		return null;
 	}
 
-	// Remove \\wsl$\ or //wsl$/ prefix and distribution name
-	const pathWithoutPrefix = wslPath
-		.replace(/^\\\\wsl\$\\/, "")
-		.replace(/^\/\/wsl\$\//, "");
+	// Normalize path separators
+	const normalizedPath = wslPath.replace(/\\/g, "/");
 
-	// Split by both backslash and forward slash
-	const parts = pathWithoutPrefix.split("\\").join("/").split("/");
+	// Remove prefix and distribution name
+	const pathWithoutPrefix = normalizedPath
+		.replace(/^\/\/wsl\$\//, "")
+		.replace(/^\/\/wsl\.localhost\//, "");
+
+	// Split by forward slash
+	const parts = pathWithoutPrefix.split("/");
 
 	// Remove the distribution name (first part) and join the rest
 	if (parts.length < 2) {
