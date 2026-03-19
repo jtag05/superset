@@ -15,6 +15,7 @@ import { runWithPostCheckoutHookTolerance } from "../../utils/git-hook-tolerance
 import { execGitWithShellPath, getSimpleGitWithShellPath } from "./git-client";
 import { execWithShellEnv, getProcessEnvWithShellPath } from "./shell-env";
 import { resolveTrackingRemoteName } from "./upstream-ref";
+import { isWslPath, wslPathToInternal } from "../../../../../main/lib/wsl/detect";
 
 const execFileAsync = promisify(execFile);
 
@@ -698,6 +699,17 @@ export async function removeWorktree(
 
 export async function getGitRoot(path: string): Promise<string> {
 	try {
+		// For WSL paths, use execGitWithShellPath directly since simple-git
+		// can't execute git inside WSL from Windows
+		if (isWslPath(path)) {
+			const internalPath = wslPathToInternal(path) ?? path;
+			const { stdout } = await execGitWithShellPath(
+				["-C", internalPath, "rev-parse", "--show-toplevel"],
+				{ cwd: internalPath },
+			);
+			return stdout.trim();
+		}
+
 		const git = await getSimpleGitWithShellPath(path);
 		const root = await git.revparse(["--show-toplevel"]);
 		return root.trim();
@@ -824,6 +836,16 @@ export async function getBranchWorktreePath({
 
 export async function hasOriginRemote(mainRepoPath: string): Promise<boolean> {
 	try {
+		// For WSL paths, use execGitWithShellPath directly
+		if (isWslPath(mainRepoPath)) {
+			const internalPath = wslPathToInternal(mainRepoPath) ?? mainRepoPath;
+			const { stdout } = await execGitWithShellPath(
+				["-C", internalPath, "remote", "get-url", "origin"],
+				{ cwd: internalPath },
+			);
+			return stdout.trim().length > 0;
+		}
+
 		const git = await getSimpleGitWithShellPath(mainRepoPath);
 		const remotes = await git.getRemotes();
 		return remotes.some((r) => r.name === "origin");
@@ -833,6 +855,86 @@ export async function hasOriginRemote(mainRepoPath: string): Promise<boolean> {
 }
 
 export async function getDefaultBranch(mainRepoPath: string): Promise<string> {
+	// For WSL paths, use execGitWithShellPath directly
+	if (isWslPath(mainRepoPath)) {
+		const internalPath = wslPathToInternal(mainRepoPath) ?? mainRepoPath;
+		const hasRemoteResult = await hasOriginRemote(mainRepoPath);
+
+		if (hasRemoteResult) {
+			// Try to get the default branch from origin/HEAD
+			try {
+				const { stdout } = await execGitWithShellPath(
+					["symbolic-ref", "refs/remotes/origin/HEAD"],
+					{ cwd: internalPath },
+				);
+				const match = stdout.trim().match(/refs\/remotes\/origin\/(.+)/);
+				if (match) return match[1];
+			} catch {}
+
+			// Check remote branches for common default branch names
+			try {
+				const { stdout } = await execGitWithShellPath(
+					["branch", "-r"],
+					{ cwd: internalPath },
+				);
+				const remoteBranches = stdout
+					.split("\n")
+					.map((b) => b.replace("origin/", "").trim())
+					.filter(Boolean);
+
+				for (const candidate of ["main", "master", "develop", "trunk"]) {
+					if (remoteBranches.includes(candidate)) {
+						return candidate;
+					}
+				}
+			} catch {}
+
+			// Try ls-remote as last resort for remote repos
+			try {
+				const { stdout } = await execGitWithShellPath(
+					["ls-remote", "--symref", "origin", "HEAD"],
+					{ cwd: internalPath },
+				);
+				const symrefMatch = stdout.match(/ref:\s+refs\/heads\/(.+?)\tHEAD/);
+				if (symrefMatch) {
+					return symrefMatch[1];
+				}
+			} catch {}
+		} else {
+			// No remote - use the current local branch or check for common branch names
+			try {
+				const currentBranch = await getCurrentBranch(mainRepoPath);
+				if (currentBranch) {
+					return currentBranch;
+				}
+			} catch {}
+
+			// Fallback: check for common default branch names locally
+			try {
+				const { stdout } = await execGitWithShellPath(
+					["branch"],
+					{ cwd: internalPath },
+				);
+				const localBranches = stdout
+					.split("\n")
+					.map((b) => b.replace(/^\*?\s*/, "").trim())
+					.filter(Boolean);
+
+				for (const candidate of ["main", "master", "develop", "trunk"]) {
+					if (localBranches.includes(candidate)) {
+						return candidate;
+					}
+				}
+				// If we have any local branches, use the first one
+				if (localBranches.length > 0) {
+					return localBranches[0];
+				}
+			} catch {}
+		}
+
+		return "main";
+	}
+
 	const git = await getSimpleGitWithShellPath(mainRepoPath);
 
 	// First check if we have an origin remote
@@ -1313,6 +1415,34 @@ export async function listBranches(
 export async function getCurrentBranch(
 	repoPath: string,
 ): Promise<string | null> {
+	// For WSL paths, use execGitWithShellPath directly
+	if (isWslPath(repoPath)) {
+		const internalPath = wslPathToInternal(repoPath) ?? repoPath;
+		try {
+			const { stdout } = await execGitWithShellPath(
+				["--abbrev-ref", "HEAD"],
+				{ cwd: internalPath },
+			);
+			const trimmed = stdout.trim();
+			if (trimmed && trimmed !== "HEAD") {
+				return trimmed;
+			}
+		} catch {
+			// Fall back to symbolic-ref below for unborn HEAD repos.
+		}
+
+		try {
+			const { stdout } = await execGitWithShellPath(
+				["symbolic-ref", "--short", "HEAD"],
+				{ cwd: internalPath },
+			);
+			const trimmed = stdout.trim();
+			return trimmed || null;
+		} catch {
+			return null;
+		}
+	}
+
 	const git = await getSimpleGitWithShellPath(repoPath);
 	try {
 		const branch = await git.revparse(["--abbrev-ref", "HEAD"]);
