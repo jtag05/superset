@@ -15,7 +15,7 @@ import { runWithPostCheckoutHookTolerance } from "../../utils/git-hook-tolerance
 import { execGitWithShellPath, getSimpleGitWithShellPath } from "./git-client";
 import { execWithShellEnv, getProcessEnvWithShellPath } from "./shell-env";
 import { resolveTrackingRemoteName } from "./upstream-ref";
-import { isWslPath, wslPathToInternal } from "../../../../../main/lib/wsl/detect";
+import { isWslPath } from "../../../../../main/lib/wsl/detect";
 
 const execFileAsync = promisify(execFile);
 
@@ -702,10 +702,9 @@ export async function getGitRoot(path: string): Promise<string> {
 		// For WSL paths, use execGitWithShellPath directly since simple-git
 		// can't execute git inside WSL from Windows
 		if (isWslPath(path)) {
-			const internalPath = wslPathToInternal(path) ?? path;
 			const { stdout } = await execGitWithShellPath(
-				["-C", internalPath, "rev-parse", "--show-toplevel"],
-				{ cwd: internalPath },
+				["rev-parse", "--show-toplevel"],
+				{ cwd: path },
 			);
 			return stdout.trim();
 		}
@@ -838,10 +837,9 @@ export async function hasOriginRemote(mainRepoPath: string): Promise<boolean> {
 	try {
 		// For WSL paths, use execGitWithShellPath directly
 		if (isWslPath(mainRepoPath)) {
-			const internalPath = wslPathToInternal(mainRepoPath) ?? mainRepoPath;
 			const { stdout } = await execGitWithShellPath(
-				["-C", internalPath, "remote", "get-url", "origin"],
-				{ cwd: internalPath },
+				["remote", "get-url", "origin"],
+				{ cwd: mainRepoPath },
 			);
 			return stdout.trim().length > 0;
 		}
@@ -857,7 +855,6 @@ export async function hasOriginRemote(mainRepoPath: string): Promise<boolean> {
 export async function getDefaultBranch(mainRepoPath: string): Promise<string> {
 	// For WSL paths, use execGitWithShellPath directly
 	if (isWslPath(mainRepoPath)) {
-		const internalPath = wslPathToInternal(mainRepoPath) ?? mainRepoPath;
 		const hasRemoteResult = await hasOriginRemote(mainRepoPath);
 
 		if (hasRemoteResult) {
@@ -865,7 +862,7 @@ export async function getDefaultBranch(mainRepoPath: string): Promise<string> {
 			try {
 				const { stdout } = await execGitWithShellPath(
 					["symbolic-ref", "refs/remotes/origin/HEAD"],
-					{ cwd: internalPath },
+					{ cwd: mainRepoPath },
 				);
 				const match = stdout.trim().match(/refs\/remotes\/origin\/(.+)/);
 				if (match) return match[1];
@@ -875,7 +872,7 @@ export async function getDefaultBranch(mainRepoPath: string): Promise<string> {
 			try {
 				const { stdout } = await execGitWithShellPath(
 					["branch", "-r"],
-					{ cwd: internalPath },
+					{ cwd: mainRepoPath },
 				);
 				const remoteBranches = stdout
 					.split("\n")
@@ -893,7 +890,7 @@ export async function getDefaultBranch(mainRepoPath: string): Promise<string> {
 			try {
 				const { stdout } = await execGitWithShellPath(
 					["ls-remote", "--symref", "origin", "HEAD"],
-					{ cwd: internalPath },
+					{ cwd: mainRepoPath },
 				);
 				const symrefMatch = stdout.match(/ref:\s+refs\/heads\/(.+?)\tHEAD/);
 				if (symrefMatch) {
@@ -913,7 +910,7 @@ export async function getDefaultBranch(mainRepoPath: string): Promise<string> {
 			try {
 				const { stdout } = await execGitWithShellPath(
 					["branch"],
-					{ cwd: internalPath },
+					{ cwd: mainRepoPath },
 				);
 				const localBranches = stdout
 					.split("\n")
@@ -1417,11 +1414,10 @@ export async function getCurrentBranch(
 ): Promise<string | null> {
 	// For WSL paths, use execGitWithShellPath directly
 	if (isWslPath(repoPath)) {
-		const internalPath = wslPathToInternal(repoPath) ?? repoPath;
 		try {
 			const { stdout } = await execGitWithShellPath(
 				["--abbrev-ref", "HEAD"],
-				{ cwd: internalPath },
+				{ cwd: repoPath },
 			);
 			const trimmed = stdout.trim();
 			if (trimmed && trimmed !== "HEAD") {
@@ -1434,7 +1430,7 @@ export async function getCurrentBranch(
 		try {
 			const { stdout } = await execGitWithShellPath(
 				["symbolic-ref", "--short", "HEAD"],
-				{ cwd: internalPath },
+				{ cwd: repoPath },
 			);
 			const trimmed = stdout.trim();
 			return trimmed || null;
